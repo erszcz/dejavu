@@ -1,13 +1,21 @@
 //! dejavu finds existing code that does the same job as other code.
 //!
-//! `scan` reports every cluster of similar units. `check` reports only the clusters that include
-//! changed code. Both only read: they parse source, they never run it, and they write nothing.
+//! `scan` reports every finding. `check` reports only the findings that include changed code.
+//! Both only read: they parse source, they never run it, and they write nothing.
+//!
+//! There are three signals, for three kinds of overlap:
+//!
+//! - `duplicates`: units with the same structure (`cluster`);
+//! - `related`: units that share a rare combination of calls (`related`);
+//! - `concepts`: nouns that two or more areas manage in their public functions (`concepts`).
 
 mod changes;
 mod cluster;
+mod concepts;
 mod fingerprint;
 mod index;
 mod lang;
+mod related;
 mod report;
 mod unit;
 
@@ -21,7 +29,7 @@ use rayon::prelude::*;
 
 use changes::Changes;
 use report::{Options, Report, Scope, Summary};
-use unit::{Extractor, FileUnits, Limits, Unit};
+use unit::{ApiFunction, Extractor, FileUnits, Limits, Outline, Unit, Wanted};
 
 #[derive(Parser)]
 #[command(name = "dejavu", version, about)]
@@ -86,9 +94,24 @@ struct Common {
     scope: Scope,
     #[arg(long, value_enum, default_value_t = Format::Text)]
     format: Format,
-    /// Show only the N highest-ranked clusters.
+    /// Show only the N highest-ranked findings of each signal.
     #[arg(long)]
     top: Option<usize>,
+    /// The signals to run. Give the option more than once, or a list with commas.
+    #[arg(long = "signal", value_enum, value_delimiter = ',', default_values_t = [Signal::Duplicates])]
+    signals: Vec<Signal>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Signal {
+    /// Units with the same structure.
+    Duplicates,
+    /// Units that share a rare combination of calls.
+    Related,
+    /// Nouns that two or more areas manage in their public functions.
+    Concepts,
+    /// All three.
+    All,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -131,38 +154,101 @@ fn run(cli: Cli) -> Result<ExitCode> {
         bail!("--threshold must be between 0 and 1");
     }
 
+    let runs = |signal| common.signals.contains(&signal) || common.signals.contains(&Signal::All);
+    let wanted = Wanted {
+        features: runs(Signal::Related),
+        api: runs(Signal::Concepts),
+    };
+
     let files = files(&common.root, &common.paths)?;
     let limits = Limits {
         min_lines: common.min_lines,
         min_tokens: common.min_tokens,
     };
-    let (units_total, units) = extract(&files, &limits)?;
+    let extracted = extract(&files, &limits, wanted)?;
+    let units = &extracted.units;
+    let top = common.top.unwrap_or(usize::MAX);
 
-    let pairs = index::similar_pairs(&units, common.threshold);
-    let clusters = cluster::clusters(&units, &pairs);
-    let changed: Option<Vec<bool>> = changes.as_ref().map(|changes| {
-        units
-            .iter()
-            .map(|u| changes.touches(&u.path, u.start_line, u.end_line))
-            .collect()
+    // The structural check always runs: the shared-call signal leaves out what it reports.
+    let pairs = index::similar_pairs(units, common.threshold);
+    let clusters = cluster::clusters(units, &pairs);
+    let changed = changes.as_ref().map(|changes| {
+        let touches = |u: &Unit| changes.touches(&u.path, u.start_line, u.end_line);
+        units.iter().map(touches).collect::<Vec<bool>>()
     });
     let options = Options {
         area_depth: common.area_depth,
         include_siblings: common.include_siblings,
         scope: common.scope,
     };
-    let mut findings = report::findings(&units, &clusters, changed.as_deref(), &options);
+    let mut findings = report::findings(units, &clusters, changed.as_deref(), &options);
     let found = findings.len();
-    findings.truncate(common.top.unwrap_or(usize::MAX));
+    findings.truncate(top);
 
-    let (identical_groups, identical_groups_cross_file) = identical_groups(&units);
+    // With outlines, the count of changed units covers units of every size.
+    let changed_units = changes.as_ref().map(|changes| {
+        if wanted.features {
+            let touches = |o: &&Outline| changes.touches(&o.path, o.start_line, o.end_line);
+            extracted.outlines.iter().filter(touches).count()
+        } else {
+            changed.iter().flatten().filter(|c| **c).count()
+        }
+    });
+
+    let related = runs(Signal::Related).then(|| {
+        let cluster_of: HashMap<(&str, u32), usize> = clusters
+            .iter()
+            .enumerate()
+            .flat_map(|(index, cluster)| cluster.members.iter().map(move |member| (index, member)))
+            .map(|(index, member)| {
+                (
+                    (units[*member].path.as_str(), units[*member].start_line),
+                    index,
+                )
+            })
+            .collect();
+        let changed = changes.as_ref().map(|changes| {
+            let touches = |o: &Outline| changes.touches(&o.path, o.start_line, o.end_line);
+            extracted
+                .outlines
+                .iter()
+                .map(touches)
+                .collect::<Vec<bool>>()
+        });
+        let mut found = related::findings(
+            &extracted.outlines,
+            common.area_depth,
+            changed.as_deref(),
+            &|outline: &Outline| {
+                cluster_of
+                    .get(&(outline.path.as_str(), outline.start_line))
+                    .copied()
+            },
+        );
+        let count = found.len();
+        found.truncate(top);
+        (count, found)
+    });
+    let concepts = runs(Signal::Concepts).then(|| {
+        let changed = changes.as_ref().map(|changes| {
+            let touches = |f: &ApiFunction| changes.touches(&f.path, f.start_line, f.end_line);
+            extracted.api.iter().map(touches).collect::<Vec<bool>>()
+        });
+        let mut found = concepts::findings(&extracted.api, changed.as_deref());
+        let count = found.len();
+        found.truncate(top);
+        (count, found)
+    });
+
+    let (identical_groups, identical_groups_cross_file) = identical_groups(units);
     let near: Vec<_> = pairs
         .iter()
         .filter(|pair| units[pair.a].loose_hash != units[pair.b].loose_hash)
         .collect();
+    let duplicates = runs(Signal::Duplicates);
     let summary = Summary {
         files: files.len(),
-        units_total,
+        units_total: extracted.total,
         units_compared: units.len(),
         min_lines: common.min_lines,
         min_tokens: common.min_tokens,
@@ -174,23 +260,30 @@ fn run(cli: Cli) -> Result<ExitCode> {
             .iter()
             .filter(|p| units[p.a].path != units[p.b].path)
             .count(),
-        changed_units: changed
-            .as_ref()
-            .map(|changed| changed.iter().filter(|c| **c).count()),
+        changed_units,
         clusters: found,
         clusters_shown: findings.len(),
+        related: related.as_ref().map(|(count, shown)| (*count, shown.len())),
+        concepts: concepts
+            .as_ref()
+            .map(|(count, shown)| (*count, shown.len())),
     };
     let report = Report {
         version: 1,
         command,
         summary: &summary,
-        clusters: &findings,
+        clusters: duplicates.then_some(findings.as_slice()),
+        related: related.as_ref().map(|(_, shown)| shown.as_slice()),
+        concepts: concepts.as_ref().map(|(_, shown)| shown.as_slice()),
     };
     match common.format {
         Format::Text => print!("{}", report::text(&report)),
         Format::Json => println!("{}", report::json(&report)),
     }
-    Ok(if fail_on_findings && found > 0 {
+    let any = (duplicates && found > 0)
+        || related.is_some_and(|(count, _)| count > 0)
+        || concepts.is_some_and(|(count, _)| count > 0);
+    Ok(if fail_on_findings && any {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
@@ -231,8 +324,16 @@ fn files(root: &Path, paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>> {
         .collect())
 }
 
-/// All units of the files, in file order, and the number of units before the size limits.
-fn extract(files: &[(PathBuf, String)], limits: &Limits) -> Result<(usize, Vec<Unit>)> {
+/// What the files give, in file order.
+struct Extracted {
+    /// The number of units before the size limits.
+    total: usize,
+    units: Vec<Unit>,
+    outlines: Vec<Outline>,
+    api: Vec<ApiFunction>,
+}
+
+fn extract(files: &[(PathBuf, String)], limits: &Limits, wanted: Wanted) -> Result<Extracted> {
     for spec in lang::ALL {
         Extractor::new(spec)?;
     }
@@ -242,27 +343,34 @@ fn extract(files: &[(PathBuf, String)], limits: &Limits) -> Result<(usize, Vec<U
             HashMap::<&'static str, Extractor>::new,
             |extractors, (full, reported)| {
                 let spec = lang::for_path(full).expect("files are filtered by language");
-                let extractor = extractors
-                    .entry(spec.name)
-                    .or_insert_with(|| Extractor::new(spec).expect("the spec was checked above"));
+                let extractor = extractors.entry(spec.name).or_insert_with(|| {
+                    Extractor::new(spec)
+                        .expect("the spec was checked above")
+                        .with(wanted)
+                });
                 match std::fs::read(full) {
                     Ok(source) => extractor.extract(reported, &source, limits),
                     Err(error) => {
                         eprintln!("dejavu: skipped {reported}: {error}");
-                        FileUnits {
-                            total: 0,
-                            units: Vec::new(),
-                        }
+                        FileUnits::default()
                     }
                 }
             },
         )
         .collect();
-    let total = per_file.iter().map(|file| file.total).sum();
-    Ok((
-        total,
-        per_file.into_iter().flat_map(|file| file.units).collect(),
-    ))
+    let mut extracted = Extracted {
+        total: 0,
+        units: Vec::new(),
+        outlines: Vec::new(),
+        api: Vec::new(),
+    };
+    for file in per_file {
+        extracted.total += file.total;
+        extracted.units.extend(file.units);
+        extracted.outlines.extend(file.outlines);
+        extracted.api.extend(file.api);
+    }
+    Ok(extracted)
 }
 
 /// Groups of units with the same loose tokens: how many, and how many of them span files.

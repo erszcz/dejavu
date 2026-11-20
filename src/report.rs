@@ -1,7 +1,8 @@
-//! Turns clusters into ranked findings, and prints them as text or JSON.
+//! Turns clusters into ranked findings, and prints all findings as text or JSON.
 //!
-//! JSON has locations, names and scores only. It never has code text, so a caller can pass it to
-//! a model without a way for the scanned code to add instructions.
+//! JSON has locations, scores and the names of modules and functions only. It never has other
+//! code text, so a caller can pass it to a model and the scanned code has little room to add
+//! instructions.
 
 use std::collections::BTreeSet;
 use std::fmt::Write;
@@ -11,6 +12,7 @@ use serde::Serialize;
 
 use crate::cluster::{Cluster, Kind};
 use crate::unit::Unit;
+use crate::{concepts, related};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Scope {
@@ -36,6 +38,17 @@ pub struct Member {
     pub name: String,
     pub tokens: usize,
     /// True when the unit overlaps a changed line. Always false for `scan`.
+    pub changed: bool,
+}
+
+/// A place in the code that a shared-call or concept finding points to.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Place {
+    pub path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub name: String,
+    /// True when the place overlaps a changed line. Always false for `scan`.
     pub changed: bool,
 }
 
@@ -70,6 +83,12 @@ pub struct Summary {
     pub changed_units: Option<usize>,
     pub clusters: usize,
     pub clusters_shown: usize,
+    /// Shared-call groups: found and shown. Absent when the signal did not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related: Option<(usize, usize)>,
+    /// Concepts: found and shown. Absent when the signal did not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concepts: Option<(usize, usize)>,
 }
 
 #[derive(Serialize)]
@@ -77,7 +96,15 @@ pub struct Report<'a> {
     pub version: u32,
     pub command: &'a str,
     pub summary: &'a Summary,
-    pub clusters: &'a [Finding],
+    /// Structural duplicates. Absent when the signal did not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clusters: Option<&'a [Finding]>,
+    /// Shared-call groups. Absent when the signal did not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related: Option<&'a [related::Finding]>,
+    /// Concepts that two or more areas manage. Absent when the signal did not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concepts: Option<&'a [concepts::Finding]>,
 }
 
 /// Findings in rank order: similarity × mean size × members, highest first. With `changed`, only
@@ -205,7 +232,7 @@ fn differences(members: &[&Unit]) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn round(value: f64) -> f64 {
+pub fn round(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
 }
 
@@ -228,25 +255,27 @@ pub fn text(report: &Report) -> String {
         summary.min_lines,
         summary.min_tokens
     );
-    let _ = writeln!(
-        out,
-        "  {} identical groups ({} cross-file), {} near pairs ({} cross-file) at similarity >= {}",
-        summary.identical_groups,
-        summary.identical_groups_cross_file,
-        summary.near_pairs,
-        summary.near_pairs_cross_file,
-        summary.threshold
-    );
     if let Some(changed) = summary.changed_units {
         let _ = writeln!(out, "  {changed} changed units");
     }
-    let _ = writeln!(
-        out,
-        "  {} clusters, {} shown",
-        summary.clusters, summary.clusters_shown
-    );
+    if report.clusters.is_some() {
+        let _ = writeln!(
+            out,
+            "  {} identical groups ({} cross-file), {} near pairs ({} cross-file) at similarity >= {}",
+            summary.identical_groups,
+            summary.identical_groups_cross_file,
+            summary.near_pairs,
+            summary.near_pairs_cross_file,
+            summary.threshold
+        );
+        let _ = writeln!(
+            out,
+            "  {} clusters, {} shown",
+            summary.clusters, summary.clusters_shown
+        );
+    }
 
-    for (index, finding) in report.clusters.iter().enumerate() {
+    for (index, finding) in report.clusters.unwrap_or_default().iter().enumerate() {
         let _ = writeln!(
             out,
             "\n#{}  {}  {:.0}%{}  {} members  {}  score {:.0}",
@@ -294,7 +323,92 @@ pub fn text(report: &Report) -> String {
             );
         }
     }
+    if let (Some(findings), Some((found, shown))) = (report.related, summary.related) {
+        related_text(&mut out, findings, found, shown);
+    }
+    if let (Some(findings), Some((found, shown))) = (report.concepts, summary.concepts) {
+        concepts_text(&mut out, findings, found, shown);
+    }
     out
+}
+
+const SHOWN_MEMBERS: usize = 8;
+
+fn related_text(out: &mut String, findings: &[related::Finding], found: usize, shown: usize) {
+    let _ = writeln!(
+        out,
+        "\nrelated: {found} groups of units that share rare calls, {shown} shown"
+    );
+    for (index, finding) in findings.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "\nR{}  {} files  {} areas  score {:.0}",
+            index + 1,
+            finding.files,
+            finding.areas,
+            finding.score
+        );
+        let _ = writeln!(out, "    shares: {}", finding.shared.join(", "));
+        // A changed place is always shown, also when the list is cut.
+        let (first, rest) = finding
+            .members
+            .split_at(SHOWN_MEMBERS.min(finding.members.len()));
+        for place in first
+            .iter()
+            .chain(rest.iter().filter(|place| place.changed))
+        {
+            let _ = writeln!(out, "    {}", place_text(place));
+        }
+        let hidden = rest.iter().filter(|place| !place.changed).count();
+        if hidden > 0 {
+            let _ = writeln!(out, "    and {hidden} more");
+        }
+    }
+}
+
+fn concepts_text(out: &mut String, findings: &[concepts::Finding], found: usize, shown: usize) {
+    let _ = writeln!(
+        out,
+        "\nconcepts: {found} nouns that two or more areas manage, {shown} shown"
+    );
+    for (index, finding) in findings.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "\nC{}  {}  shared verbs: {}",
+            index + 1,
+            finding.noun,
+            finding.shared_verbs.join(" ")
+        );
+        for context in &finding.contexts {
+            let path = context
+                .members
+                .first()
+                .map_or("", |place| place.path.as_str());
+            let _ = writeln!(
+                out,
+                "    {}{}  {}: {}",
+                if context.members.iter().any(|place| place.changed) {
+                    "* "
+                } else {
+                    ""
+                },
+                path,
+                context.noun,
+                context.verbs.join(" ")
+            );
+        }
+    }
+}
+
+fn place_text(place: &Place) -> String {
+    format!(
+        "{}{}:{}-{}  {}",
+        if place.changed { "* " } else { "" },
+        place.path,
+        place.start_line,
+        place.end_line,
+        place.name
+    )
 }
 
 const SHOWN_TOKEN_CHARS: usize = 40;
@@ -505,7 +619,9 @@ mod tests {
             version: 1,
             command: "scan",
             summary: &summary,
-            clusters: &found,
+            clusters: Some(&found),
+            related: None,
+            concepts: None,
         });
         assert!(!rendered.contains("secret"), "{rendered}");
         assert!(rendered.contains("\"differing_tokens\": 1"), "{rendered}");

@@ -1,5 +1,6 @@
-//! Language support. A language is data (node kinds, one query) plus one small hook.
+//! Language support. A language is data (node kinds, one query) plus a few small hooks.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use tree_sitter::{Language, Node};
@@ -13,6 +14,11 @@ pub struct UnitParts<'tree> {
     /// The unit's own name.
     pub name: Option<Node<'tree>>,
 }
+
+/// The short names that a file gives to other modules, as `short name -> full name`.
+pub type Aliases = HashMap<String, String>;
+pub type FeaturesFn = fn(Node<'_>, &[u8], &Aliases) -> BTreeSet<String>;
+pub type ApiFunctionsFn = for<'tree> fn(Node<'tree>, &[u8]) -> Vec<(String, Node<'tree>)>;
 
 pub struct LanguageSpec {
     pub name: &'static str,
@@ -30,6 +36,14 @@ pub struct LanguageSpec {
     pub callee_positions: &'static [(&'static str, &'static str)],
     pub number_kinds: &'static [&'static str],
     pub string_kinds: &'static [&'static str],
+    pub aliases: fn(Node<'_>, &[u8]) -> Aliases,
+    /// What a unit uses from other modules: the functions it calls and the types it builds, with
+    /// full names. Two units that share rare features do related work.
+    pub features: FeaturesFn,
+    /// True when the file at this path is the public entry of its directory.
+    pub api_file: fn(&str) -> bool,
+    /// The public functions that a file defines, in source order.
+    pub api_functions: ApiFunctionsFn,
 }
 
 pub static ALL: &[&LanguageSpec] = &[&elixir::SPEC];
@@ -39,4 +53,15 @@ pub fn for_path(path: &Path) -> Option<&'static LanguageSpec> {
     ALL.iter()
         .copied()
         .find(|spec| spec.extensions.contains(&extension))
+}
+
+/// Visits `root` and every named node below it, in source order.
+pub fn walk<'tree>(root: Node<'tree>, mut visit: impl FnMut(Node<'tree>)) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        visit(node);
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
+    }
 }

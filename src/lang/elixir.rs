@@ -4,9 +4,13 @@
 //! nodes, so the query matches on the call target. Operators are anonymous leaves below
 //! `binary_operator`, so the tokens include anonymous leaves.
 
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+
 use tree_sitter::{Language, Node};
 
-use super::{LanguageSpec, UnitParts};
+use super::{walk, LanguageSpec, UnitParts};
 
 pub static SPEC: LanguageSpec = LanguageSpec {
     name: "elixir",
@@ -20,37 +24,195 @@ pub static SPEC: LanguageSpec = LanguageSpec {
     callee_positions: &[("call", "target"), ("dot", "right")],
     number_kinds: &["integer", "float"],
     string_kinds: &["quoted_content"],
+    aliases,
+    features,
+    api_file,
+    api_functions,
 };
 
 fn language() -> Language {
     tree_sitter_elixir::LANGUAGE.into()
 }
 
-/// The name is in the first argument of the clause: `name(args)`, a bare `name` for a head with
-/// no parentheses, or one of these on the left of a `when` guard.
-fn unit_parts(unit: Node<'_>) -> UnitParts<'_> {
-    let keyword = unit.child_by_field_name("target");
-    let mut cursor = unit.walk();
-    let arguments = unit
+fn text<'a>(node: Node<'_>, source: &'a [u8]) -> Cow<'a, str> {
+    String::from_utf8_lossy(&source[node.byte_range()])
+}
+
+/// The text of a call's target, when the target is a plain identifier such as `def` or `alias`.
+fn target_text<'a>(call: Node<'_>, source: &'a [u8]) -> Option<Cow<'a, str>> {
+    call.child_by_field_name("target")
+        .filter(|target| target.kind() == "identifier")
+        .map(|target| text(target, source))
+}
+
+fn arguments(call: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = call.walk();
+    let found = call
         .named_children(&mut cursor)
         .find(|child| child.kind() == "arguments");
-    let head = arguments
-        .and_then(|arguments| arguments.named_child(0))
-        .and_then(|head| {
-            if head.kind() == "binary_operator" {
-                head.named_child(0)
-            } else {
-                Some(head)
-            }
-        });
-    let name = head.and_then(|head| match head.kind() {
+    found
+}
+
+fn first_argument(call: Node<'_>) -> Option<Node<'_>> {
+    arguments(call).and_then(|arguments| arguments.named_child(0))
+}
+
+/// The name in a function head: `name(args)`, a bare `name` for a head with no parentheses, or
+/// one of these on the left of a `when` guard or of the `::` of a callback.
+fn head_name(mut head: Node<'_>) -> Option<Node<'_>> {
+    while head.kind() == "binary_operator" {
+        head = head.named_child(0)?;
+    }
+    match head.kind() {
         "call" => head
             .child_by_field_name("target")
             .filter(|target| target.kind() == "identifier"),
         "identifier" => Some(head),
         _ => None,
+    }
+}
+
+fn unit_parts(unit: Node<'_>) -> UnitParts<'_> {
+    UnitParts {
+        keyword: unit.child_by_field_name("target"),
+        name: first_argument(unit).and_then(head_name),
+    }
+}
+
+fn last_segment(module: &str) -> &str {
+    module.rsplit('.').next().unwrap_or(module)
+}
+
+/// `alias A.B`, `alias A.B, as: C` and `alias A.{B, C.D}`, anywhere in the file.
+fn aliases(root: Node<'_>, source: &[u8]) -> HashMap<String, String> {
+    let mut found = HashMap::new();
+    walk(root, |node| {
+        if node.kind() != "call" || target_text(node, source).as_deref() != Some("alias") {
+            return;
+        }
+        let Some(arguments) = arguments(node) else {
+            return;
+        };
+        let Some(first) = arguments.named_child(0) else {
+            return;
+        };
+        match first.kind() {
+            "alias" => {
+                let full = text(first, source).into_owned();
+                let short =
+                    alias_as(arguments, source).unwrap_or_else(|| last_segment(&full).to_string());
+                found.insert(short, full);
+            }
+            "dot" => {
+                let base = first.child_by_field_name("left");
+                let names = first.child_by_field_name("right");
+                let (Some(base), Some(names)) = (base, names) else {
+                    return;
+                };
+                if base.kind() != "alias" || names.kind() != "tuple" {
+                    return;
+                }
+                let base = text(base, source);
+                let mut cursor = names.walk();
+                for name in names.named_children(&mut cursor) {
+                    if name.kind() == "alias" {
+                        let name = text(name, source);
+                        found.insert(last_segment(&name).to_string(), format!("{base}.{name}"));
+                    }
+                }
+            }
+            _ => {}
+        }
     });
-    UnitParts { keyword, name }
+    found
+}
+
+/// The `X` of `as: X` in the arguments of an alias.
+fn alias_as(arguments: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cursor = arguments.walk();
+    let keywords = arguments
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "keywords")?;
+    let mut cursor = keywords.walk();
+    let found = keywords.named_children(&mut cursor).find_map(|pair| {
+        let key = pair.named_child(0)?;
+        let value = pair.named_child(1)?;
+        let is_as = text(key, source).trim_end().trim_end_matches(':') == "as";
+        (is_as && value.kind() == "alias").then(|| text(value, source).into_owned())
+    });
+    found
+}
+
+/// A module name with its first segment replaced by what the file's aliases say.
+fn resolve(module: &str, aliases: &HashMap<String, String>) -> String {
+    let (head, rest) = module.split_once('.').unwrap_or((module, ""));
+    match aliases.get(head) {
+        Some(full) if rest.is_empty() => full.clone(),
+        Some(full) => format!("{full}.{rest}"),
+        None => module.to_string(),
+    }
+}
+
+/// Remote calls as `Module.function` and struct literals as `%Module`.
+fn features(unit: Node<'_>, source: &[u8], aliases: &HashMap<String, String>) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    walk(unit, |node| match node.kind() {
+        "call" => {
+            let Some(target) = node.child_by_field_name("target") else {
+                return;
+            };
+            let module = target.child_by_field_name("left");
+            let function = target.child_by_field_name("right");
+            if let ("dot", Some(module), Some(function)) = (target.kind(), module, function) {
+                if module.kind() == "alias" && function.kind() == "identifier" {
+                    let module = resolve(&text(module, source), aliases);
+                    found.insert(format!("{module}.{}", text(function, source)));
+                }
+            }
+        }
+        "struct" => {
+            let mut cursor = node.walk();
+            let module = node
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "alias");
+            if let Some(module) = module {
+                found.insert(format!("%{}", resolve(&text(module, source), aliases)));
+            }
+        }
+        _ => {}
+    });
+    found
+}
+
+/// A context's public module has the name of its directory: `folders/folders.ex`.
+fn api_file(path: &str) -> bool {
+    let path = Path::new(path);
+    let directory = path.parent().and_then(Path::file_name);
+    directory.is_some() && path.file_stem() == directory
+}
+
+/// `def`, `defdelegate`, `defmacro` and `@callback`. A context that dispatches to an
+/// implementation declares its functions as callbacks.
+fn api_functions<'tree>(root: Node<'tree>, source: &[u8]) -> Vec<(String, Node<'tree>)> {
+    let mut found = Vec::new();
+    walk(root, |node| {
+        let head = match node.kind() {
+            "call" => match target_text(node, source).as_deref() {
+                Some("def" | "defdelegate" | "defmacro") => first_argument(node),
+                _ => None,
+            },
+            "unary_operator" => node
+                .named_child(0)
+                .filter(|inner| inner.kind() == "call")
+                .filter(|inner| target_text(*inner, source).as_deref() == Some("callback"))
+                .and_then(first_argument),
+            _ => None,
+        };
+        if let Some(name) = head.and_then(head_name) {
+            found.push((text(name, source).into_owned(), node));
+        }
+    });
+    found
 }
 
 #[cfg(test)]
@@ -161,6 +323,117 @@ mod tests {
         }
         let local = only("def f(a), do: g(a)\n");
         assert_ne!(local.loose_hash, only("def f(a), do: h(a)\n").loose_hash);
+    }
+
+    fn outlines(source: &str) -> Vec<crate::unit::Outline> {
+        let limits = Limits {
+            min_lines: 1,
+            min_tokens: 1,
+        };
+        let wanted = crate::unit::Wanted {
+            features: true,
+            api: false,
+        };
+        Extractor::new(&super::SPEC)
+            .unwrap()
+            .with(wanted)
+            .extract("lib/app/a/a.ex", source.as_bytes(), &limits)
+            .outlines
+    }
+
+    fn api(path: &str, source: &str) -> Vec<(String, u32)> {
+        let limits = Limits {
+            min_lines: 1,
+            min_tokens: 1,
+        };
+        let wanted = crate::unit::Wanted {
+            features: false,
+            api: true,
+        };
+        Extractor::new(&super::SPEC)
+            .unwrap()
+            .with(wanted)
+            .extract(path, source.as_bytes(), &limits)
+            .api
+            .into_iter()
+            .map(|function| (function.name, function.start_line))
+            .collect()
+    }
+
+    #[test]
+    fn features_are_remote_calls_and_structs_with_full_names() {
+        let source = "defmodule M do
+  alias App.Billing
+  alias App.Accounts.User, as: Account
+  alias App.Shared.{Repo, Errors.NotFound}
+
+  def f(id) do
+    user = Repo.get(Account, id)
+    local(user)
+    Billing.Plans.charge(user)
+    Enum.map([], & &1)
+    %NotFound{id: id}
+  end
+end
+";
+        let found = outlines(source);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            (
+                found[0].name.as_str(),
+                found[0].start_line,
+                found[0].end_line
+            ),
+            ("f", 6, 12)
+        );
+        assert_eq!(
+            found[0].features,
+            [
+                "%App.Shared.Errors.NotFound",
+                "App.Billing.Plans.charge",
+                "App.Shared.Repo.get",
+                "Enum.map"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_small_unit_has_an_outline_too() {
+        let found = outlines("def f(a), do: Map.get(a, :k)\n");
+        assert_eq!(found[0].features, ["Map.get"]);
+    }
+
+    #[test]
+    fn the_public_entry_file_has_the_name_of_its_directory() {
+        assert!(super::api_file("lib/app/folders/folders.ex"));
+        assert!(!super::api_file("lib/app/folders/internal/folders_impl.ex"));
+        assert!(!super::api_file("folders.ex"));
+    }
+
+    #[test]
+    fn api_functions_are_public_definitions_and_callbacks_once_each() {
+        let source = "defmodule App.Folders do
+  @callback create_folder(map()) :: {:ok, term()} | {:error, term()}
+  @callback list_folders(binary()) :: [term()] when a: term()
+  defdelegate get_folder(id), to: Impl
+  def delete_folder(id) when is_binary(id), do: Impl.delete(id)
+  def delete_folder(_), do: :error
+  defp helper(x), do: x
+  @doc \"text\"
+  defmacro update_folder(x), do: x
+end
+";
+        assert_eq!(
+            api("lib/app/folders/folders.ex", source),
+            [
+                ("create_folder".to_string(), 2),
+                ("list_folders".to_string(), 3),
+                ("get_folder".to_string(), 4),
+                ("delete_folder".to_string(), 5),
+                ("update_folder".to_string(), 9),
+            ]
+        );
+        assert_eq!(api("lib/app/folders/internal/impl.ex", source), []);
     }
 
     #[test]
