@@ -25,6 +25,7 @@ pub static SPEC: LanguageSpec = LanguageSpec {
     number_kinds: &["integer", "float"],
     string_kinds: &["quoted_content"],
     aliases,
+    modules,
     features,
     api_file,
     api_functions,
@@ -125,6 +126,23 @@ fn aliases(root: Node<'_>, source: &[u8]) -> HashMap<String, String> {
         }
     });
     found
+}
+
+/// `defmodule` and `defprotocol` at the top level of the file.
+fn modules(root: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .filter(|node| node.kind() == "call")
+        .filter(|node| {
+            matches!(
+                target_text(*node, source).as_deref(),
+                Some("defmodule" | "defprotocol")
+            )
+        })
+        .filter_map(first_argument)
+        .filter(|name| name.kind() == "alias")
+        .map(|name| text(name, source).into_owned())
+        .collect()
 }
 
 /// The `X` of `as: X` in the arguments of an alias.
@@ -394,6 +412,20 @@ end
                 "App.Shared.Repo.get",
                 "Enum.map"
             ]
+        );
+    }
+
+    #[test]
+    fn modules_are_the_top_level_definitions() {
+        let source = "defmodule App.A do\n  defmodule Inner do\n  end\nend\n\ndefprotocol App.P do\nend\n\ndefimpl App.P, for: App.A do\nend\n";
+        let tree = {
+            let mut parser = tree_sitter::Parser::new();
+            parser.set_language(&super::language()).unwrap();
+            parser.parse(source, None).unwrap()
+        };
+        assert_eq!(
+            super::modules(tree.root_node(), source.as_bytes()),
+            ["App.A", "App.P"]
         );
     }
 

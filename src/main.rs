@@ -214,16 +214,26 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .map(touches)
                 .collect::<Vec<bool>>()
         });
-        let mut found = related::findings(
-            &extracted.outlines,
-            common.area_depth,
-            changed.as_deref(),
-            &|outline: &Outline| {
+        // A feature is local when its first name is the first name of a scanned module.
+        let roots: BTreeSet<&str> = extracted
+            .modules
+            .iter()
+            .map(|module| module.split('.').next().unwrap_or(module))
+            .collect();
+        let input = related::Input {
+            area_depth: common.area_depth,
+            changed: changed.as_deref(),
+            duplicate_cluster: &|outline: &Outline| {
                 cluster_of
                     .get(&(outline.path.as_str(), outline.start_line))
                     .copied()
             },
-        );
+            is_local: &|feature: &str| {
+                let module = feature.trim_start_matches('%');
+                roots.contains(module.split('.').next().unwrap_or(module))
+            },
+        };
+        let mut found = related::findings(&extracted.outlines, &input);
         report::mark_agreement(&mut findings, &found);
         let count = found.len();
         found.truncate(top);
@@ -331,6 +341,7 @@ struct Extracted {
     total: usize,
     units: Vec<Unit>,
     outlines: Vec<Outline>,
+    modules: Vec<String>,
     api: Vec<ApiFunction>,
 }
 
@@ -363,12 +374,14 @@ fn extract(files: &[(PathBuf, String)], limits: &Limits, wanted: Wanted) -> Resu
         total: 0,
         units: Vec::new(),
         outlines: Vec::new(),
+        modules: Vec::new(),
         api: Vec::new(),
     };
     for file in per_file {
         extracted.total += file.total;
         extracted.units.extend(file.units);
         extracted.outlines.extend(file.outlines);
+        extracted.modules.extend(file.modules);
         extracted.api.extend(file.api);
     }
     Ok(extracted)

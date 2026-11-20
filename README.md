@@ -103,16 +103,36 @@ A cluster has one of three kinds:
    common vocabulary, for example `Enum.map`.
 3. **Groups.** A group is a set of at least 3 rare features that units in at least 3 files and
    2 areas all have. One shared call is reuse and is not reported.
-4. **Rank.** The rarity of the shared features × files × areas.
+4. **Rank.** The rarity of the shared features × files × areas, with three factors:
+   - agreement with `duplicates` raises the score (see below);
+   - a group with no feature from the scanned code gets a quarter of the score, for example a
+     group that shares only three functions of a standard library;
+   - a group that shares only types and no call gets half of the score.
 
-A lower group that mostly repeats a higher one is left out.
+A lower group is left out when all its features are in a higher group, or at least half of its
+members are.
+
+The three factors come from a reading of the 30 highest groups of one codebase, where each group
+was judged as a real repeated job, a partial one, or not one. They are a first calibration and
+not a general result.
+
+| Judged groups | Before the factors | With the factors |
+|---|---|---|
+| Top 10 | 7 real, 2 partial, 1 false | 7 real, 3 partial, 0 false |
+| Top 20 | 10 real, 9 partial, 1 false | 13 real, 6 partial, 1 false |
+| Top 30 | 15 real, 12 partial, 3 false | 16 real, 10 partial, 4 false |
+
+The top of the list is better. Below rank 20 it is not: of the 8 groups that the factors brought
+into the top 30, 2 are real, 3 are partial and 3 are false. Use `--top` with this signal.
 
 ## Where signals agree
 
 A pair that two signals both find is a stronger finding, so the report shows it:
 
 - a `related` group has `also_duplicates`: the number of its members that the `duplicates` signal
-  also links to another member. These members raise the score of the group, up to twice the score;
+  also links to another member. These members raise the score of the group, up to three times
+  the score, and a group with agreement keeps its full score when it has no local feature or
+  shares only types;
 - a `duplicates` cluster has the label `also-related` when two or more of its members are in one
   `related` group. This label needs `--signal` to include `related`.
 
@@ -195,8 +215,8 @@ text, so the scanned code has little room to add instructions for a model that r
 - Elixir only. A language is one file in `src/lang/`: node kinds, one query and one small hook.
 - `duplicates` is structural. Two pieces of code that do the same job in different ways are not
   found by it. `related` finds them only when they share at least 3 rare calls.
-- `related` and `concepts` are untuned. Their limits are constants in `src/related.rs` and
-  `src/concepts.rs`, taken from one codebase.
+- `related` is calibrated on one codebase only, and `concepts` is not calibrated. Their limits
+  are constants in `src/related.rs` and `src/concepts.rs`.
 - `concepts` reads names only. It cannot tell a second implementation of a concept from two
   different things with the same name.
 - dejavu reports that code is similar and where it is. It does not know if the other code can be

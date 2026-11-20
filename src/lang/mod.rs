@@ -37,8 +37,12 @@ pub struct LanguageSpec {
     pub number_kinds: &'static [&'static str],
     pub string_kinds: &'static [&'static str],
     pub aliases: fn(Node<'_>, &[u8]) -> Aliases,
+    /// The full names of the modules that a file defines at its top level. A feature of one of
+    /// these modules, or of a module below one, is local to the scanned code.
+    pub modules: fn(Node<'_>, &[u8]) -> Vec<String>,
     /// What a unit uses from other modules: the functions it calls and the types it builds, with
-    /// full names. Two units that share rare features do related work.
+    /// full names. A call is `Module.function`. A type starts with `%`. Two units that share rare
+    /// features do related work.
     pub features: FeaturesFn,
     /// True when the file at this path is the public entry of its directory.
     pub api_file: fn(&str) -> bool,

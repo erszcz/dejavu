@@ -68,6 +68,8 @@ pub struct FileUnits {
     pub total: usize,
     pub units: Vec<Unit>,
     pub outlines: Vec<Outline>,
+    /// The modules that the file defines. Collected with the features.
+    pub modules: Vec<String>,
     pub api: Vec<ApiFunction>,
 }
 
@@ -132,6 +134,11 @@ impl Extractor {
         nodes.dedup_by_key(|node| node.id());
 
         let spec = self.spec;
+        let modules = if self.wanted.features {
+            (spec.modules)(tree.root_node(), source)
+        } else {
+            Vec::new()
+        };
         let outlines = if self.wanted.features {
             let aliases = (spec.aliases)(tree.root_node(), source);
             nodes
@@ -173,6 +180,7 @@ impl Extractor {
             total,
             units,
             outlines,
+            modules,
             api,
         }
     }
