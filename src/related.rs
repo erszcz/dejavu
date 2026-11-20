@@ -32,6 +32,9 @@ pub struct Finding {
     pub files: usize,
     pub areas: usize,
     pub score: f64,
+    /// How many of the members the `duplicates` signal also links to another member. When two
+    /// signals agree on a pair, the finding is stronger.
+    pub also_duplicates: usize,
     pub members: Vec<Place>,
 }
 
@@ -40,14 +43,15 @@ struct Group {
     members: Vec<usize>,
     files: usize,
     areas: usize,
+    also_duplicates: usize,
     score: f64,
 }
 
 /// Groups in rank order: the rarity of the shared features × files × areas, highest first.
 ///
 /// With `changed`, only groups that have a changed unit are findings. `duplicate_cluster` gives
-/// the structural cluster of a unit. A group with two members in one cluster is left out, because
-/// the structural check reports it already.
+/// the structural cluster of a unit. Members that are also in one structural cluster raise the
+/// score of a group by their share of the members, up to twice the score.
 pub fn findings(
     outlines: &[Outline],
     area_depth: usize,
@@ -115,12 +119,14 @@ pub fn findings(
     let mut groups: Vec<Group> = by_members
         .into_iter()
         .filter(|(members, _)| changed.is_none_or(|changed| members.iter().any(|m| changed[*m])))
-        .filter(|(members, _)| !two_in_one_cluster(members, outlines, duplicate_cluster))
         .map(|(members, features)| {
             let (files, areas) = spread(&members);
             let weight: f64 = features.iter().map(|id| rarity(*id)).sum();
+            let also_duplicates = also_duplicates(&members, outlines, duplicate_cluster);
+            let agreement = 1.0 + also_duplicates as f64 / members.len() as f64;
             Group {
-                score: weight * files as f64 * areas as f64,
+                score: weight * files as f64 * areas as f64 * agreement,
+                also_duplicates,
                 features,
                 members,
                 files,
@@ -164,6 +170,7 @@ pub fn findings(
                 files: group.files,
                 areas: group.areas,
                 score: round(group.score),
+                also_duplicates: group.also_duplicates,
                 members: group
                     .members
                     .iter()
@@ -183,16 +190,20 @@ pub fn findings(
         .collect()
 }
 
-fn two_in_one_cluster(
+/// The number of members that share a structural cluster with another member.
+fn also_duplicates(
     members: &[usize],
     outlines: &[Outline],
     duplicate_cluster: &dyn Fn(&Outline) -> Option<usize>,
-) -> bool {
-    let mut seen = BTreeSet::new();
-    members
+) -> usize {
+    let clusters: Vec<usize> = members
         .iter()
         .filter_map(|member| duplicate_cluster(&outlines[*member]))
-        .any(|cluster| !seen.insert(cluster))
+        .collect();
+    clusters
+        .iter()
+        .filter(|cluster| clusters.iter().filter(|other| other == cluster).count() > 1)
+        .count()
 }
 
 #[cfg(test)]
@@ -289,11 +300,24 @@ mod tests {
     }
 
     #[test]
-    fn a_group_that_the_structural_check_reports_is_left_out() {
+    fn members_that_are_also_structural_duplicates_are_counted_and_raise_the_score() {
         let outlines = corpus();
-        let cluster = |outline: &Outline| outline.path.starts_with("lib/app/one/").then_some(7);
-        assert_eq!(findings(&outlines, 3, None, &cluster), []);
+        let alone = findings(&outlines, 3, None, &none);
+        assert_eq!(alone[0].also_duplicates, 0);
+
         let one = |outline: &Outline| (outline.path == "lib/app/one/a.ex").then_some(7);
-        assert_eq!(findings(&outlines, 3, None, &one).len(), 1);
+        assert_eq!(findings(&outlines, 3, None, &one), alone);
+
+        let two = |outline: &Outline| outline.path.starts_with("lib/app/one/").then_some(7);
+        let agreed = findings(&outlines, 3, None, &two);
+        assert_eq!(agreed[0].also_duplicates, 2);
+        assert_eq!(agreed[0].score, round(alone[0].score * (1.0 + 2.0 / 3.0)));
+
+        let apart = |outline: &Outline| match outline.path.as_str() {
+            "lib/app/one/a.ex" => Some(7),
+            "lib/app/one/b.ex" => Some(8),
+            _ => None,
+        };
+        assert_eq!(findings(&outlines, 3, None, &apart), alone);
     }
 }

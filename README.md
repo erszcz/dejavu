@@ -105,8 +105,16 @@ A cluster has one of three kinds:
    2 areas all have. One shared call is reuse and is not reported.
 4. **Rank.** The rarity of the shared features × files × areas.
 
-A group that the `duplicates` signal reports already is left out. A lower group that mostly
-repeats a higher one is left out too.
+A lower group that mostly repeats a higher one is left out.
+
+## Where signals agree
+
+A pair that two signals both find is a stronger finding, so the report shows it:
+
+- a `related` group has `also_duplicates`: the number of its members that the `duplicates` signal
+  also links to another member. These members raise the score of the group, up to twice the score;
+- a `duplicates` cluster has the label `also-related` when two or more of its members are in one
+  `related` group. This label needs `--signal` to include `related`.
 
 ## The `concepts` signal
 
@@ -154,6 +162,7 @@ With `--signal`, the report has one key for each signal that ran: `clusters`, `r
       "files": 4,
       "areas": 4,
       "score": 285.0,
+      "also_duplicates": 0,
       "members": [
         { "path": "lib/a.ex", "start_line": 97, "end_line": 151, "name": "schedule_and_wait", "changed": false }
       ]

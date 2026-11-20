@@ -169,7 +169,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let units = &extracted.units;
     let top = common.top.unwrap_or(usize::MAX);
 
-    // The structural check always runs: the shared-call signal leaves out what it reports.
+    // The structural check always runs: the shared-call signal says where the two agree.
     let pairs = index::similar_pairs(units, common.threshold);
     let clusters = cluster::clusters(units, &pairs);
     let changed = changes.as_ref().map(|changes| {
@@ -183,7 +183,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
     };
     let mut findings = report::findings(units, &clusters, changed.as_deref(), &options);
     let found = findings.len();
-    findings.truncate(top);
 
     // With outlines, the count of changed units covers units of every size.
     let changed_units = changes.as_ref().map(|changes| {
@@ -225,10 +224,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     .copied()
             },
         );
+        report::mark_agreement(&mut findings, &found);
         let count = found.len();
         found.truncate(top);
         (count, found)
     });
+    findings.truncate(top);
     let concepts = runs(Signal::Concepts).then(|| {
         let changed = changes.as_ref().map(|changes| {
             let touches = |f: &ApiFunction| changes.touches(&f.path, f.start_line, f.end_line);

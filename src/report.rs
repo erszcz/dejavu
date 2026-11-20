@@ -199,6 +199,24 @@ fn finding(
     })
 }
 
+/// Adds the label `also-related` to each cluster that has two or more members in one shared-call
+/// group. When two signals agree on a pair, the finding is stronger.
+pub fn mark_agreement(clusters: &mut [Finding], related: &[related::Finding]) {
+    for cluster in clusters {
+        let agrees = related.iter().any(|group| {
+            let in_group = |member: &&Member| {
+                group.members.iter().any(|place| {
+                    (&place.path, place.start_line) == (&member.path, member.start_line)
+                })
+            };
+            cluster.members.iter().filter(in_group).count() > 1
+        });
+        if agrees {
+            cluster.labels.push("also-related");
+        }
+    }
+}
+
 /// The directory of `path`, cut to its first `depth` components.
 pub fn area(path: &str, depth: usize) -> &str {
     let directory = path
@@ -349,6 +367,14 @@ fn related_text(out: &mut String, findings: &[related::Finding], found: usize, s
             finding.score
         );
         let _ = writeln!(out, "    shares: {}", finding.shared.join(", "));
+        if finding.also_duplicates > 0 {
+            let _ = writeln!(
+                out,
+                "    also structural duplicates: {} of {} members",
+                finding.also_duplicates,
+                finding.members.len()
+            );
+        }
         // A changed place is always shown, also when the list is cut.
         let (first, rest) = finding
             .members
@@ -600,6 +626,48 @@ mod tests {
             .collect();
         assert_eq!(found[0].differences, expected);
         assert_eq!(found[0].differing_tokens, 3);
+    }
+
+    #[test]
+    fn a_cluster_with_two_members_in_one_related_group_is_marked() {
+        let units = [
+            unit("a.ex", "f", &[]),
+            unit("b.ex", "f", &[]),
+            unit("c.ex", "g", &[]),
+            unit("d.ex", "g", &[]),
+        ];
+        let clusters = [
+            cluster(&[0, 1], Kind::Near, 0.9),
+            cluster(&[2, 3], Kind::Near, 0.9),
+        ];
+        let mut found = findings(&units, &clusters, None, &ALL);
+        let place = |path: &str| Place {
+            path: path.to_string(),
+            start_line: 1,
+            end_line: 9,
+            name: "f".to_string(),
+            changed: false,
+        };
+        let group = related::Finding {
+            shared: Vec::new(),
+            files: 3,
+            areas: 2,
+            score: 1.0,
+            also_duplicates: 2,
+            members: vec![place("a.ex"), place("b.ex"), place("c.ex")],
+        };
+        mark_agreement(&mut found, &[group]);
+        let labels: Vec<_> = found
+            .iter()
+            .map(|f| (f.members[0].path.as_str(), f.labels.clone()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("a.ex", vec!["cross-file", "also-related"]),
+                ("c.ex", vec!["cross-file"])
+            ]
+        );
     }
 
     #[test]
