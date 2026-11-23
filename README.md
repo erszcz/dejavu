@@ -212,7 +212,7 @@ text, so the scanned code has little room to add instructions for a model that r
 
 ## Limits
 
-- Elixir only. A language is one file in `src/lang/`: node kinds, one query and one small hook.
+- Elixir (`ex`, `exs`) for all three signals; Erlang (`erl`, `hrl`, `escript`, `yrl`) for `duplicates` only. A language is one file in `src/lang/`: node kinds, one query and one small hook.
 - `duplicates` is structural. Two pieces of code that do the same job in different ways are not
   found by it. `related` finds them only when they share at least 3 rare calls.
 - `related` is calibrated on one codebase only, and `concepts` is not calibrated. Their limits

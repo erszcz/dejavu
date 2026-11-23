@@ -115,6 +115,8 @@ impl Extractor {
     }
 
     pub fn extract(&mut self, path: &str, source: &[u8], limits: &Limits) -> FileUnits {
+        let preprocessed = self.spec.preprocess.and_then(|f| f(path, source));
+        let source = preprocessed.as_deref().unwrap_or(source);
         let Some(tree) = self.parser.parse(source, None) else {
             return FileUnits::default();
         };

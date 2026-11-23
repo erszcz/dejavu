@@ -6,6 +6,7 @@ use std::path::Path;
 use tree_sitter::{Language, Node};
 
 pub mod elixir;
+pub mod erlang;
 
 /// The two leaves of a unit that are normalised apart from the general rules.
 pub struct UnitParts<'tree> {
@@ -19,6 +20,7 @@ pub struct UnitParts<'tree> {
 pub type Aliases = HashMap<String, String>;
 pub type FeaturesFn = fn(Node<'_>, &[u8], &Aliases) -> BTreeSet<String>;
 pub type ApiFunctionsFn = for<'tree> fn(Node<'tree>, &[u8]) -> Vec<(String, Node<'tree>)>;
+pub type PreprocessFn = fn(&str, &[u8]) -> Option<Vec<u8>>;
 
 pub struct LanguageSpec {
     pub name: &'static str,
@@ -48,9 +50,12 @@ pub struct LanguageSpec {
     pub api_file: fn(&str) -> bool,
     /// The public functions that a file defines, in source order.
     pub api_functions: ApiFunctionsFn,
+    /// Optional per-file preprocessing before parsing (for example, blanking out a Yecc
+    /// grammar header in `.yrl` files). Must preserve line numbers.
+    pub preprocess: Option<PreprocessFn>,
 }
 
-pub static ALL: &[&LanguageSpec] = &[&elixir::SPEC];
+pub static ALL: &[&LanguageSpec] = &[&elixir::SPEC, &erlang::SPEC];
 
 pub fn for_path(path: &Path) -> Option<&'static LanguageSpec> {
     let extension = path.extension()?.to_str()?;

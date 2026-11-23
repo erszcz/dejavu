@@ -150,7 +150,7 @@ fn finding(
         .map(|path| area(path, options.area_depth))
         .collect();
 
-    let siblings = paths.len() == 1 && names.len() == 1;
+    let siblings = paths.len() == 1 && names.len() == 1 && !names.contains("?");
     let in_scope = match options.scope {
         Scope::All => true,
         Scope::CrossFile => paths.len() > 1,
@@ -536,6 +536,17 @@ mod tests {
             labels(&[0, 4], &ALL),
             Some(vec!["cross-file", "cross-area"])
         );
+    }
+
+    #[test]
+    fn unnamed_units_in_the_same_file_are_not_siblings() {
+        let units = [
+            unit("lib/app/a/x.erl", "?", &[]),
+            unit("lib/app/a/x.erl", "?", &[]),
+        ];
+        let found = findings(&units, &[cluster(&[0, 1], Kind::Near, 0.9)], None, &ALL);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].labels, ["same-file"]);
     }
 
     #[test]

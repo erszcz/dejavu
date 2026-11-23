@@ -29,6 +29,7 @@ pub static SPEC: LanguageSpec = LanguageSpec {
     features,
     api_file,
     api_functions,
+    preprocess: None,
 };
 
 fn language() -> Language {
