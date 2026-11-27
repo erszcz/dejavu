@@ -220,6 +220,66 @@ spaces and `_-./:#` of a title stay, and a title has at most 80 characters. The 
 code text, so the scanned code has little room to add instructions for a model that reads the
 report.
 
+## Releases
+
+[CHANGELOG.md](CHANGELOG.md) has the changes of each version. The versions follow Semantic
+Versioning. Before 1.0.0:
+
+- a new feature, a changed default or a change in the format of the report gives a new minor
+  version;
+- a fix gives a new patch version.
+
+A release is a commit on `main` with the tag `v<version>`, for example `v0.4.0`.
+`dejavu --version` gives the version of a build.
+
+### Mark a commit for the change log
+
+A commit is in the change log only when its message has a `Changelog:` trailer. The value is one of
+`added`, `changed`, `deprecated`, `removed` and `fixed`. The subject of the commit becomes the
+entry. Do not mark a small change, for example a refactor, a new test or a corrected typo.
+
+```text
+Add TypeScript support for the duplicates signal
+
+A function, a method and an arrow function are units.
+
+Changelog: added
+```
+
+### Make a release
+
+[git-cliff](https://git-cliff.org) reads the commits after the last tag and writes the section of
+the new version. `cliff.toml` has its configuration. Install it with `brew install git-cliff` or
+`cargo install git-cliff`.
+
+1. Look at the entries that the next version will have:
+
+   ```bash
+   git cliff --unreleased
+   ```
+
+2. Write the section of the new version at the top of the change log:
+
+   ```bash
+   git cliff --unreleased --tag v0.5.0 --prepend CHANGELOG.md
+   ```
+
+3. Edit the new section when an entry needs more words. Set `version` in `Cargo.toml` and run
+   `cargo build`, which updates `Cargo.lock`.
+4. Commit, tag and push:
+
+   ```bash
+   git commit -am "Release 0.5.0"
+   ```
+
+   ```bash
+   git tag v0.5.0
+   ```
+
+   ```bash
+   git push origin main v0.5.0
+   ```
+
 ## Limits
 
 - ExUnit blocks are units for `duplicates` only. `related` does not read them, because the tests

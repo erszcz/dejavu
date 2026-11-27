@@ -1,6 +1,6 @@
 [package]
 name = "dejavu"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2021"
 description = "Finds existing code that does the same job as other code, by structural similarity"
 publish = false
