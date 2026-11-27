@@ -1,4 +1,6 @@
-//! Elixir. The unit is the function clause.
+//! Elixir. The unit is the function clause, or an ExUnit block: `test`, `property`, `setup` or
+//! `setup_all` with a `do` block. `describe` is not a unit. It only holds tests, and each test in
+//! it is compared on its own.
 //!
 //! The grammar has no function-definition node: `def`, `defp` and the macro forms are all `call`
 //! nodes, so the query matches on the call target. Operators are anonymous leaves below
@@ -17,7 +19,10 @@ pub static SPEC: LanguageSpec = LanguageSpec {
     extensions: &["ex", "exs"],
     language,
     unit_query: r#"(call target: (identifier) @keyword
-  (#any-of? @keyword "def" "defp" "defmacro" "defmacrop")) @unit"#,
+  (#any-of? @keyword "def" "defp" "defmacro" "defmacrop")) @unit
+(call target: (identifier) @keyword
+  (#any-of? @keyword "test" "property" "setup" "setup_all")
+  (do_block)) @unit"#,
     unit_parts,
     skip_kinds: &["comment"],
     identifier_kinds: &["identifier"],
@@ -74,11 +79,35 @@ fn head_name(mut head: Node<'_>) -> Option<Node<'_>> {
     }
 }
 
-fn unit_parts(unit: Node<'_>) -> UnitParts<'_> {
+/// The ExUnit blocks that are units.
+const BLOCKS: &[&str] = &["test", "property", "setup", "setup_all"];
+
+fn unit_parts<'tree>(unit: Node<'tree>, source: &[u8]) -> UnitParts<'tree> {
+    let keyword = unit.child_by_field_name("target");
+    let block = target_text(unit, source)
+        .and_then(|keyword| BLOCKS.iter().copied().find(|block| *block == keyword));
+    let name = match block {
+        Some(_) => first_argument(unit).and_then(title),
+        None => first_argument(unit).and_then(head_name),
+    };
     UnitParts {
-        keyword: unit.child_by_field_name("target"),
-        name: first_argument(unit).and_then(head_name),
+        keyword,
+        name,
+        block,
     }
+}
+
+/// The text of a block's title: `test "title" do`. A title with an interpolation or an escape has
+/// several parts, and this is the first one. `setup` has no title.
+fn title(argument: Node<'_>) -> Option<Node<'_>> {
+    if argument.kind() != "string" {
+        return None;
+    }
+    let mut cursor = argument.walk();
+    let found = argument
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "quoted_content");
+    found
 }
 
 fn last_segment(module: &str) -> &str {
@@ -474,5 +503,98 @@ end
         let a = only("def f(a) do\n  # why\n  g(a)\nend\n");
         let b = only("def f(a) do\n  g(a)\nend\n");
         assert_eq!(a.strict_hash, b.strict_hash);
+    }
+
+    fn names(source: &str) -> Vec<(String, bool)> {
+        units(source)
+            .into_iter()
+            .map(|unit| (unit.name, unit.block))
+            .collect()
+    }
+
+    fn named(names: &[(&str, bool)]) -> Vec<(String, bool)> {
+        names
+            .iter()
+            .map(|(name, block)| (name.to_string(), *block))
+            .collect()
+    }
+
+    #[test]
+    fn a_test_is_a_block_unit_named_by_its_title() {
+        let source = "test \"creates a user\" do\n  assert f(1) == 2\nend\n";
+        assert_eq!(names(source), named(&[("test creates a user", true)]));
+    }
+
+    #[test]
+    fn a_test_with_a_context_is_a_unit() {
+        let unit = only("test \"reads it\", %{conn: conn} do\n  assert get(conn)\nend\n");
+        assert_eq!(
+            (unit.name.as_str(), unit.start_line, unit.end_line),
+            ("test reads it", 1, 3)
+        );
+    }
+
+    #[test]
+    fn a_clause_is_not_a_block() {
+        assert_eq!(names("def f(a), do: a\n"), named(&[("f", false)]));
+    }
+
+    #[test]
+    fn setup_blocks_and_properties_are_units() {
+        let source = "setup do\n  :ok\nend\n\nsetup_all context do\n  context\nend\n\n\
+                      property \"holds\" do\n  check(all(x <- term()), do: assert(x == x))\nend\n";
+        assert_eq!(
+            names(source),
+            named(&[
+                ("setup", true),
+                ("setup_all", true),
+                ("property holds", true)
+            ])
+        );
+    }
+
+    #[test]
+    fn a_block_without_a_do_block_is_not_a_unit() {
+        assert!(units("setup :create_user\ntest \"not written yet\"\n").is_empty());
+    }
+
+    #[test]
+    fn describe_is_not_a_unit_but_its_tests_are() {
+        let source = "describe \"f/1\" do\n  setup do\n    :ok\n  end\n\n  \
+                      test \"one\" do\n    assert f(1)\n  end\n\n  \
+                      test \"two\" do\n    assert f(2)\n  end\nend\n";
+        assert_eq!(
+            names(source),
+            named(&[("setup", true), ("test one", true), ("test two", true)])
+        );
+    }
+
+    #[test]
+    fn the_title_of_a_test_is_not_compared() {
+        let a = only("test \"one thing\" do\n  assert f(1) == 2\nend\n");
+        let b = only("test \"another thing\" do\n  assert f(1) == 2\nend\n");
+        assert_eq!(a.strict_hash, b.strict_hash);
+        let other = only("test \"one thing\" do\n  assert f(1) == 3\nend\n");
+        assert_ne!(a.strict_hash, other.strict_hash);
+        assert_eq!(a.loose_hash, other.loose_hash);
+    }
+
+    #[test]
+    fn the_name_of_a_block_has_plain_characters_only() {
+        let unit = only("test \"a <b> & `c`, d_e-f./:# (g)\" do\n  assert f(1)\nend\n");
+        assert_eq!(unit.name, "test a b c d_e-f./:# g");
+        let long = format!("test \"{}\" do\n  assert f(1)\nend\n", "x".repeat(200));
+        assert_eq!(only(&long).name, format!("test {}", "x".repeat(80)));
+    }
+
+    #[test]
+    fn a_block_gives_no_outline() {
+        let source = "def helper(a), do: Map.get(a, :k)\n\n\
+                      test \"reads\" do\n  assert Map.get(%{}, :k) == nil\nend\n";
+        let found: Vec<_> = outlines(source)
+            .into_iter()
+            .map(|outline| outline.name)
+            .collect();
+        assert_eq!(found, ["helper"]);
     }
 }

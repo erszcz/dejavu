@@ -150,7 +150,8 @@ fn finding(
         .map(|path| area(path, options.area_depth))
         .collect();
 
-    let siblings = paths.len() == 1 && names.len() == 1 && !names.contains("?");
+    let clauses = members.iter().all(|unit| !unit.block);
+    let siblings = clauses && paths.len() == 1 && names.len() == 1 && !names.contains("?");
     let in_scope = match options.scope {
         Scope::All => true,
         Scope::CrossFile => paths.len() > 1,
@@ -478,6 +479,7 @@ mod tests {
             start_line: 1,
             end_line: 9,
             name: name.to_string(),
+            block: false,
             strict: strict.iter().map(|token| token.to_string()).collect(),
             strict_hash: 0,
             loose_hash: 0,
@@ -508,6 +510,31 @@ mod tests {
         assert_eq!(area("lib/app/x.ex", 3), "lib/app");
         assert_eq!(area("x.ex", 3), "");
         assert_eq!(area("lib/app/cases/x.ex", 0), "");
+    }
+
+    #[test]
+    fn blocks_in_one_file_with_one_name_are_not_clauses_of_one_function() {
+        let block = |path: &str| Unit {
+            block: true,
+            ..unit(path, "setup", &[])
+        };
+        let units = [
+            block("test/a_test.exs"),
+            block("test/a_test.exs"),
+            block("test/b_test.exs"),
+        ];
+        let labels = |members: &[usize]| {
+            findings(
+                &units,
+                &[cluster(members, Kind::Identical, 1.0)],
+                None,
+                &ALL,
+            )
+            .pop()
+            .map(|finding| finding.labels)
+        };
+        assert_eq!(labels(&[0, 1]), Some(vec!["same-file"]));
+        assert_eq!(labels(&[0, 2]), Some(vec!["cross-file"]));
     }
 
     #[test]

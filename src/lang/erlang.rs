@@ -31,10 +31,11 @@ fn language() -> Language {
     tree_sitter_erlang::LANGUAGE.into()
 }
 
-fn unit_parts(unit: Node<'_>) -> UnitParts<'_> {
+fn unit_parts<'tree>(unit: Node<'tree>, _source: &[u8]) -> UnitParts<'tree> {
     UnitParts {
         keyword: None,
         name: unit.child_by_field_name("name"),
+        block: None,
     }
 }
 
@@ -142,10 +143,7 @@ mod tests {
 
     #[test]
     fn reads_the_name_of_a_clause_with_a_guard() {
-        assert_eq!(
-            only("foo(A) when is_integer(A) ->\n    A.\n").name,
-            "foo"
-        );
+        assert_eq!(only("foo(A) when is_integer(A) ->\n    A.\n").name, "foo");
     }
 
     #[test]
@@ -271,10 +269,7 @@ mod tests {
             assert_eq!(spec.name, "erlang");
         }
 
-        let hrl = units_for(
-            "defs.hrl",
-            "-define(HANDLER(X), fun(Y) -> X + Y end).\n",
-        );
+        let hrl = units_for("defs.hrl", "-define(HANDLER(X), fun(Y) -> X + Y end).\n");
         assert_eq!(hrl.len(), 1);
         assert_eq!(hrl[0].name, "?");
 

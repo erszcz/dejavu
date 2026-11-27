@@ -14,6 +14,9 @@ pub struct UnitParts<'tree> {
     pub keyword: Option<Node<'tree>>,
     /// The unit's own name.
     pub name: Option<Node<'tree>>,
+    /// For a unit that is a block and not a clause of a function, such as a test: what the block
+    /// is, for example `test`. Two blocks in one file are never clauses of one function.
+    pub block: Option<&'static str>,
 }
 
 /// The short names that a file gives to other modules, as `short name -> full name`.
@@ -28,7 +31,7 @@ pub struct LanguageSpec {
     pub language: fn() -> Language,
     /// A tree-sitter query. The capture `@unit` marks one comparison unit.
     pub unit_query: &'static str,
-    pub unit_parts: for<'tree> fn(Node<'tree>) -> UnitParts<'tree>,
+    pub unit_parts: for<'tree> fn(Node<'tree>, &[u8]) -> UnitParts<'tree>,
     /// Subtrees of these kinds give no tokens.
     pub skip_kinds: &'static [&'static str],
     /// Leaves of these kinds are names. The loose level replaces them, unless they are callees.

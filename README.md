@@ -74,8 +74,10 @@ an error.
 
 ## How it works
 
-1. **Units.** A language spec gives a tree-sitter query for the unit of comparison. For Elixir the
-   unit is the function clause (`def`, `defp`, `defmacro`, `defmacrop`).
+1. **Units.** A language spec gives a tree-sitter query for the unit of comparison. For Elixir a
+   unit is a function clause (`def`, `defp`, `defmacro`, `defmacrop`) or an ExUnit block (`test`,
+   `property`, `setup`, `setup_all`) that has a `do` block. `describe` is not a unit: each test in
+   it is compared on its own.
 2. **Tokens.** Each unit becomes its leaf tokens, with comments removed. Two levels are kept:
    - strict: only the unit's own name is replaced;
    - loose: variable names, numbers and string contents are replaced too. Called functions,
@@ -93,6 +95,11 @@ A cluster has one of three kinds:
 - `identical-modulo-names`: the same after names, numbers and strings are replaced. The text report
   lists what differs: these are the parameters that a shared function would take;
 - `near`: similar, at or above the threshold.
+
+Tests are reported like other code, also when they are only `near`. Tests in one file often share
+their first steps, so `test/` gives many `near` clusters. A cluster of this type does not make the
+suite slower, but its shared steps can go into one helper. The title of a test is its name, so two
+tests with the same body and different titles are `identical`.
 
 ## The `related` signal
 
@@ -207,11 +214,16 @@ With `--signal`, the report has one key for each signal that ran: `clusters`, `r
 }
 ```
 
-The JSON has locations, scores and the names of modules and functions only. It has no other code
-text, so the scanned code has little room to add instructions for a model that reads the report.
+The JSON has locations, scores and the names of modules, functions and ExUnit blocks only. The name
+of a block is what it is and its title, for example `test creates a user`. Only letters, digits,
+spaces and `_-./:#` of a title stay, and a title has at most 80 characters. The JSON has no other
+code text, so the scanned code has little room to add instructions for a model that reads the
+report.
 
 ## Limits
 
+- ExUnit blocks are units for `duplicates` only. `related` does not read them, because the tests
+  of one function all call it.
 - Elixir (`ex`, `exs`) for all three signals; Erlang (`erl`, `hrl`, `escript`, `yrl`) for `duplicates` only. A language is one file in `src/lang/`: node kinds, one query and one small hook.
 - `duplicates` is structural. Two pieces of code that do the same job in different ways are not
   found by it. `related` finds them only when they share at least 3 rare calls.

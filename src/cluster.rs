@@ -103,6 +103,7 @@ mod tests {
             start_line: 1,
             end_line: 9,
             name: "f".to_string(),
+            block: false,
             strict: Vec::new(),
             strict_hash,
             loose_hash,

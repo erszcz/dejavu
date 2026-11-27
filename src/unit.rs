@@ -6,13 +6,15 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 
 use crate::fingerprint::{hash_bytes, hash_sequence, minhash, shingles};
-use crate::lang::LanguageSpec;
+use crate::lang::{LanguageSpec, UnitParts};
 
 pub struct Unit {
     pub path: String,
     pub start_line: u32,
     pub end_line: u32,
     pub name: String,
+    /// True for a block, such as a test. False for a clause of a function.
+    pub block: bool,
     /// Token texts at the strict level: only the unit's own name is replaced.
     pub strict: Vec<String>,
     pub strict_hash: u64,
@@ -143,13 +145,17 @@ impl Extractor {
         };
         let outlines = if self.wanted.features {
             let aliases = (spec.aliases)(tree.root_node(), source);
+            // A block gives no outline: the tests of one function all call it, so their shared
+            // calls say nothing.
             nodes
                 .iter()
-                .map(|node| Outline {
+                .map(|node| (node, (spec.unit_parts)(*node, source)))
+                .filter(|(_node, parts)| parts.block.is_none())
+                .map(|(node, parts)| Outline {
                     path: path.to_string(),
                     start_line: start_line(node),
                     end_line: end_line(node),
-                    name: name((spec.unit_parts)(*node).name, source),
+                    name: name(&parts, source),
                     features: (spec.features)(*node, source, &aliases)
                         .into_iter()
                         .collect(),
@@ -189,7 +195,7 @@ impl Extractor {
 
     fn unit(&self, path: &str, node: Node, source: &[u8], limits: &Limits) -> Option<Unit> {
         let spec = self.spec;
-        let parts = (spec.unit_parts)(node);
+        let parts = (spec.unit_parts)(node, source);
         let name_id = parts.name.map(|name| name.id());
         let keyword_id = parts.keyword.map(|keyword| keyword.id());
 
@@ -264,7 +270,8 @@ impl Extractor {
             path: path.to_string(),
             start_line: start_line(&node),
             end_line: end_line(&node),
-            name: name(parts.name, source),
+            name: name(&parts, source),
+            block: parts.block.is_some(),
             strict,
             strict_hash: hash_sequence(&strict_hashes),
             loose_hash: hash_sequence(&loose),
@@ -286,7 +293,35 @@ fn lines(node: &Node) -> u32 {
     end_line(node) - start_line(node) + 1
 }
 
-fn name(node: Option<Node>, source: &[u8]) -> String {
-    node.map(|node| String::from_utf8_lossy(&source[node.byte_range()]).into_owned())
-        .unwrap_or_else(|| "?".to_string())
+/// The name to report. A clause has the name of its function. A block has what it is and its
+/// title, for example `test creates a user`.
+fn name(parts: &UnitParts, source: &[u8]) -> String {
+    let text = parts
+        .name
+        .map(|node| String::from_utf8_lossy(&source[node.byte_range()]));
+    match (parts.block, text) {
+        (None, Some(text)) => text.into_owned(),
+        (None, None) => "?".to_string(),
+        (Some(block), Some(text)) => format!("{block} {}", plain(&text)).trim_end().to_string(),
+        (Some(block), None) => block.to_string(),
+    }
+}
+
+const TITLE_CHARS: usize = 80;
+
+/// A title is free text from the scanned code, and the JSON report is given to models. So only
+/// letters, digits, spaces and `_-./:#` stay, in one line that is cut short.
+fn plain(title: &str) -> String {
+    let kept: String = title
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "_-./:#".contains(c) {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let one_line = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    one_line.chars().take(TITLE_CHARS).collect()
 }
