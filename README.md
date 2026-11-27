@@ -248,37 +248,34 @@ Changelog: added
 
 ### Make a release
 
-[git-cliff](https://git-cliff.org) reads the commits after the last tag and writes the section of
-the new version. `cliff.toml` has its configuration. Install it with `brew install git-cliff` or
-`cargo install git-cliff`.
+One command makes a release:
 
-1. Look at the entries that the next version will have:
+```bash
+scripts/release.sh 0.5.0
+```
 
-   ```bash
-   git cliff --unreleased
-   ```
+The script sets `version` in `Cargo.toml` and `Cargo.lock`, writes the section of the version at
+the top of `CHANGELOG.md`, makes the commit `Release 0.5.0` and tags it `v0.5.0`. It makes them in
+one run, so the version, the change log and the tag always agree. It does not push: it prints the
+push command.
 
-2. Write the section of the new version at the top of the change log:
+The script stops and changes nothing when:
 
-   ```bash
-   git cliff --unreleased --tag v0.5.0 --prepend CHANGELOG.md
-   ```
+- the branch is not `main`, or the working tree has changes;
+- the tag exists, or the version is not after the last one;
+- no commit after the last tag has a `Changelog:` trailer;
+- a test fails.
 
-3. Edit the new section when an entry needs more words. Set `version` in `Cargo.toml` and run
-   `cargo build`, which updates `Cargo.lock`.
-4. Commit, tag and push:
+[git-cliff](https://git-cliff.org) writes the section from the commits after the last tag, and
+`cliff.toml` has its configuration. Install it with `brew install git-cliff` or
+`cargo install git-cliff`. To see the entries that the next version will have:
 
-   ```bash
-   git commit -am "Release 0.5.0"
-   ```
+```bash
+git cliff --unreleased
+```
 
-   ```bash
-   git tag v0.5.0
-   ```
-
-   ```bash
-   git push origin main v0.5.0
-   ```
+Do not set the version or write a section by hand. The test in `tests/release.rs` fails when the
+newest version in `CHANGELOG.md` is not the version in `Cargo.toml`.
 
 ## Limits
 
